@@ -1,7 +1,9 @@
 import concurrent.futures
+import json
 import sys
 import time
 from functools import lru_cache
+from typing import AsyncGenerator
 
 import requests
 from dotenv import load_dotenv
@@ -18,13 +20,14 @@ load_dotenv()
 
 
 def initialize_llm():
+    """Initialize the model through Ollama."""
+    print("🦙 Initializing model through Ollama...")
     try:
         llm = OllamaLLM(model="llama3.1", base_url="http://localhost:11434")
         return llm
     except Exception as e:
         print(f"❌ Error initializing LLM: {e}")
-        print("Make sure Ollama is running and llama3.1 is installed.")
-        print("Install with: ollama pull llama3.1")
+        print("Make sure Ollama is running and selected model is installed.")
         sys.exit(1)
 
 
@@ -156,7 +159,6 @@ def search_phone_specs(query: str, tavily_search):
         print(f"❌ Error during search: {e}")
         return []
 
-
 def get_phone_specs(query: str, llm, tavily_search, return_sources=False):
     """Main function to process user query."""
     print("🔍 Searching for phone specifications...")
@@ -164,7 +166,8 @@ def get_phone_specs(query: str, llm, tavily_search, return_sources=False):
 
     if not search_results:
         return (
-        "No search results found for the query.", []) if return_sources else "No search results found for the query."
+            "No search results found for the query.",
+            []) if return_sources else "No search results found for the query."
 
     all_documents = []
     total_results = len(search_results)
@@ -217,3 +220,114 @@ def get_phone_specs(query: str, llm, tavily_search, return_sources=False):
 
     error_msg = "Could not generate a summary of the phone specifications."
     return (error_msg, sources) if return_sources else error_msg
+
+async def stream_specs_generator(query: str, llm, tavily_search) -> AsyncGenerator[str, None]:
+    """Generator function for streaming phone specifications with real-time LLM output."""
+    try:
+        search_results = search_phone_specs(query, tavily_search)
+
+        if not search_results:
+            yield json.dumps({"status": "error", "message": "No search results found for the query."}) + "\n"
+            return
+
+        all_documents = []
+        sources = []
+        # total_results = len(search_results)
+
+        for i, result in enumerate(search_results):
+            if 'url' in result:
+                sources.append(result['url'])
+                documents = scrape_website(result['url'])
+                if documents:
+                    all_documents.extend(documents)
+
+        if not all_documents:
+            yield json.dumps(
+                {"status": "error", "message": "Could not retrieve any useful content from the search results."}) + "\n"
+            return
+
+        chunks = process_documents(all_documents)
+        if not chunks:
+            yield json.dumps({"status": "error", "message": "Failed to process the documents."}) + "\n"
+            return
+
+        vector_store = create_vector_store(chunks)
+        if not vector_store:
+            yield json.dumps({"status": "error", "message": "Failed to create vector store from the documents."}) + "\n"
+            return
+
+        qa_chain = setup_rag_pipeline(llm, vector_store)
+        if not qa_chain:
+            yield json.dumps({"status": "error", "message": "Failed to set up the processing pipeline."}) + "\n"
+            return
+
+        try:
+            query_text = f"What are the detailed specifications of {query}?"
+
+            partial_response = {
+                "status": "generating",
+                "query": query,
+                "sources": sources,
+                "specifications": ""
+            }
+
+            retriever = vector_store.as_retriever(search_kwargs={'k': 5})
+            docs = retriever.get_relevant_documents(query_text)
+
+            template = """
+            You are an AI assistant specialized in extracting and summarizing phone specifications.
+            Use the following information to provide a detailed summary of the phone specifications.
+
+            Format your response following these rules:
+            - Main headings should be between ** (e.g., **Display**)
+            - Bullet points should use + instead of - (e.g., + 6.7-inch screen)
+
+            Focus on key specifications like:
+            + Display (size, resolution, technology)
+            + Processor (chipset, CPU, GPU)
+            + Camera (main camera, selfie camera, video capabilities)
+            + Battery (capacity, charging speed)
+            + Storage and RAM options
+            + Connectivity (5G, WiFi, Bluetooth)
+            + Operating System
+            + Special features
+            + Release date and price (if available)
+
+            Present the information in a clear, organized manner with sections for each category.
+
+            Context information: {context}
+
+            Question: {question}
+
+            Detailed phone specifications:
+            """
+
+            prompt = PromptTemplate(
+                input_variables=["context", "question"],
+                template=template,
+            )
+
+            context_text = "\n\n".join([doc.page_content for doc in docs])
+            formatted_prompt = prompt.format(context=context_text, question=query_text)
+
+            # Stream the response from the LLM
+            for chunk in llm.stream(formatted_prompt):
+                partial_response["specifications"] += chunk
+
+                # Send the updated partial response
+                yield json.dumps(partial_response) + "\n"
+
+            # Send the final complete response
+            final_response = {
+                "status": "complete",
+                "specifications": partial_response["specifications"],
+                "query": query,
+                "sources": sources
+            }
+            yield json.dumps(final_response) + "\n"
+
+        except Exception as e:
+            yield json.dumps({"status": "error", "message": f"Error generating specifications: {str(e)}"}) + "\n"
+
+    except Exception as e:
+        yield json.dumps({"status": "error", "message": str(e)}) + "\n"

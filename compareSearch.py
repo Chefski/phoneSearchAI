@@ -20,15 +20,14 @@ load_dotenv()
 
 
 def initialize_llm():
-    """Initialize the Llama 3.1 model through Ollama."""
-    print("🦙 Initializing Llama 3.1 through Ollama...")
+    """Initialize the model through Ollama."""
+    print("🦙 Initializing model through Ollama...")
     try:
-        llm = OllamaLLM(model="llama3.1", base_url="http://localhost:11434")
+        llm = OllamaLLM(model="qwen2.5", base_url="http://localhost:11434")
         return llm
     except Exception as e:
         print(f"❌ Error initializing LLM: {e}")
-        print("Make sure Ollama is running and llama3.1 is installed.")
-        print("Install with: ollama pull llama3.1")
+        print("Make sure Ollama is running and selected model is installed.")
         sys.exit(1)
 
 
@@ -209,7 +208,7 @@ def search_phone_specs(query: str, tavily_search, llm, max_sources=4):
     try:
         query_info = analyze_query_type(query, llm)
 
-        tavily_search.max_results = max_sources + 2
+        tavily_search.max_results = max_sources
 
         all_results = []
         for model in query_info["models"]:
@@ -431,12 +430,12 @@ async def stream_compare_generator(query: str, llm, tavily_search, max_sources=4
             
             Include at least 8-10 key comparison points in the table. For the verdict row, provide a one-sentence summary of each phone's strengths.
             """
-            
+
             prompt = PromptTemplate(
                 input_variables=["context", "question"],
                 template=template,
             )
-            
+
             formatted_prompt = prompt.format(context=context_text, question=analysis_query)
 
             # Stream the response from the LLM
