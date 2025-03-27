@@ -18,6 +18,64 @@ from langchain_ollama import OllamaLLM
 
 load_dotenv()
 
+COMPARE_TEMPLATE = """
+You are an expert mobile device specialist with deep knowledge of smartphones, their specifications, market trends, and user experiences. Your expertise covers:
+
+1. Detailed Technical Analysis:
+- Display technology (OLED, LCD, refresh rates, brightness, resolution)
+- Processing capabilities (chipset benchmarks, real-world performance)
+- Camera systems (sensor specs, computational photography features)
+- Battery technology (capacity, charging speeds, battery life)
+- Build quality and materials
+- Storage and memory configurations
+- Connectivity features (5G bands, WiFi standards)
+- Special features and unique selling points
+
+2. Comparative Analysis:
+- Price-to-performance ratio
+- Feature comparison across different models
+- Market positioning and target audience
+- Historical context and generational improvements
+
+3. User Experience Insights:
+- Real-world performance analysis
+- Long-term reliability factors
+- Software update policies and support
+- Common issues and solutions
+
+4. Market Context:
+- Release timing and availability
+- Price trends and value retention
+- Competition in the same segment
+- Regional variations and availability
+
+Use the provided context to give detailed, expert-level responses about mobile devices.
+If comparing phones, highlight key differentiating factors and make clear recommendations based on use cases.
+If analyzing a single phone, provide comprehensive insights about its position in the market and its strengths/weaknesses.
+
+Context information: {context}
+
+Question: {question}
+
+Analysis:
+
+[Provide your detailed analysis here]
+
+When comparing multiple phones, ALWAYS end your response with a structured comparison table that summarizes key specifications and features. Format the table like this:
+
+| Feature | Phone Model 1 | Phone Model 2 | ... |
+|---------|--------------|--------------|-----|
+| Display | Display specs | Display specs | ... |
+| Processor | Processor specs | Processor specs | ... |
+| Camera | Camera specs | Camera specs | ... |
+| Battery | Battery specs | Battery specs | ... |
+| Storage | Storage options | Storage options | ... |
+| Price | Price range | Price range | ... |
+| Verdict | Brief verdict | Brief verdict | ... |
+
+Include at least 8-10 key comparison points in the table. For the verdict row, provide a one-sentence summary of each phone's strengths.
+"""
+
 
 def initialize_llm():
     """Initialize the model through Ollama."""
@@ -75,16 +133,22 @@ def process_documents(documents):
     return chunks
 
 
+@lru_cache(maxsize=1)
+def get_embeddings():
+    """Get cached embeddings model."""
+    return HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={'device': 'cpu'}
+    )
+
+
 def create_vector_store(chunks):
     if not chunks:
         return None
 
     print("🧠 Creating vector embeddings with Chroma...")
     try:
-        embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            model_kwargs={'device': 'cpu'}
-        )
+        embeddings = get_embeddings()
         persist_directory = "chroma_db"
         vector_store = Chroma.from_documents(
             documents=chunks,
@@ -101,63 +165,7 @@ def setup_rag_pipeline(llm, vector_store):
     if not vector_store:
         return None
 
-    template = """
-    You are an expert mobile device specialist with deep knowledge of smartphones, their specifications, market trends, and user experiences. Your expertise covers:
-
-    1. Detailed Technical Analysis:
-    - Display technology (OLED, LCD, refresh rates, brightness, resolution)
-    - Processing capabilities (chipset benchmarks, real-world performance)
-    - Camera systems (sensor specs, computational photography features)
-    - Battery technology (capacity, charging speeds, battery life)
-    - Build quality and materials
-    - Storage and memory configurations
-    - Connectivity features (5G bands, WiFi standards)
-    - Special features and unique selling points
-
-    2. Comparative Analysis:
-    - Price-to-performance ratio
-    - Feature comparison across different models
-    - Market positioning and target audience
-    - Historical context and generational improvements
-
-    3. User Experience Insights:
-    - Real-world performance analysis
-    - Long-term reliability factors
-    - Software update policies and support
-    - Common issues and solutions
-
-    4. Market Context:
-    - Release timing and availability
-    - Price trends and value retention
-    - Competition in the same segment
-    - Regional variations and availability
-
-    Use the provided context to give detailed, expert-level responses about mobile devices.
-    If comparing phones, highlight key differentiating factors and make clear recommendations based on use cases.
-    If analyzing a single phone, provide comprehensive insights about its position in the market and its strengths/weaknesses.
-
-    Context information: {context}
-
-    Question: {question}
-
-    Analysis:
-    
-    [Provide your detailed analysis here]
-    
-    When comparing multiple phones, ALWAYS end your response with a structured comparison table that summarizes key specifications and features. Format the table like this:
-    
-    | Feature | Phone Model 1 | Phone Model 2 | ... |
-    |---------|--------------|--------------|-----|
-    | Display | Display specs | Display specs | ... |
-    | Processor | Processor specs | Processor specs | ... |
-    | Camera | Camera specs | Camera specs | ... |
-    | Battery | Battery specs | Battery specs | ... |
-    | Storage | Storage options | Storage options | ... |
-    | Price | Price range | Price range | ... |
-    | Verdict | Brief verdict | Brief verdict | ... |
-    
-    Include at least 8-10 key comparison points in the table. For the verdict row, provide a one-sentence summary of each phone's strengths.
-    """
+    template = COMPARE_TEMPLATE
 
     QA_CHAIN_PROMPT = PromptTemplate(
         input_variables=["context", "question"],
@@ -188,7 +196,7 @@ def analyze_query_type(query: str, llm) -> dict:
 
     Return a JSON object with these keys:
     {{"type": "specs|compare|info", "models": ["model1", "model2"], "focus": "specific aspects"}}
-    
+
     If multiple phone models are mentioned, always set type to "compare".
     Extract exact phone model names accurately.
     """
@@ -305,12 +313,10 @@ async def stream_compare_generator(query: str, llm, tavily_search, max_sources=4
             yield json.dumps({"status": "error", "message": "No search results found for the query."}) + "\n"
             return
 
-        # Process documents
         all_documents = []
         sources = []
         total_results = len(search_results)
 
-        # Process each search result
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             future_to_url = {}
             for i, result in enumerate(search_results):
@@ -373,63 +379,7 @@ async def stream_compare_generator(query: str, llm, tavily_search, max_sources=4
 
             context_text = "\n\n".join([doc.page_content for doc in docs])
 
-            template = """
-            You are an expert mobile device specialist with deep knowledge of smartphones, their specifications, market trends, and user experiences. Your expertise covers:
-
-            1. Detailed Technical Analysis:
-            - Display technology (OLED, LCD, refresh rates, brightness, resolution)
-            - Processing capabilities (chipset benchmarks, real-world performance)
-            - Camera systems (sensor specs, computational photography features)
-            - Battery technology (capacity, charging speeds, battery life)
-            - Build quality and materials
-            - Storage and memory configurations
-            - Connectivity features (5G bands, WiFi standards)
-            - Special features and unique selling points
-
-            2. Comparative Analysis:
-            - Price-to-performance ratio
-            - Feature comparison across different models
-            - Market positioning and target audience
-            - Historical context and generational improvements
-
-            3. User Experience Insights:
-            - Real-world performance analysis
-            - Long-term reliability factors
-            - Software update policies and support
-            - Common issues and solutions
-
-            4. Market Context:
-            - Release timing and availability
-            - Price trends and value retention
-            - Competition in the same segment
-            - Regional variations and availability
-
-            Use the provided context to give detailed, expert-level responses about mobile devices.
-            If comparing phones, highlight key differentiating factors and make clear recommendations based on use cases.
-            If analyzing a single phone, provide comprehensive insights about its position in the market and its strengths/weaknesses.
-
-            Context information: {context}
-
-            Question: {question}
-
-            Analysis:
-            
-            [Provide your detailed analysis here]
-            
-            When comparing multiple phones, ALWAYS end your response with a structured comparison table that summarizes key specifications and features. Format the table like this:
-            
-            | Feature | Phone Model 1 | Phone Model 2 | ... |
-            |---------|--------------|--------------|-----|
-            | Display | Display specs | Display specs | ... |
-            | Processor | Processor specs | Processor specs | ... |
-            | Camera | Camera specs | Camera specs | ... |
-            | Battery | Battery specs | Battery specs | ... |
-            | Storage | Storage options | Storage options | ... |
-            | Price | Price range | Price range | ... |
-            | Verdict | Brief verdict | Brief verdict | ... |
-            
-            Include at least 8-10 key comparison points in the table. For the verdict row, provide a one-sentence summary of each phone's strengths.
-            """
+            template = COMPARE_TEMPLATE
 
             prompt = PromptTemplate(
                 input_variables=["context", "question"],

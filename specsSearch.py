@@ -18,6 +18,34 @@ from langchain_ollama import OllamaLLM
 
 load_dotenv()
 
+SPECS_TEMPLATE = """
+You are an AI assistant specialized in extracting and summarizing phone specifications.
+Use the following information to provide a detailed summary of the phone specifications.
+
+Format your response following these rules:
+- Main headings should be between ** (e.g., **Display**)
+- Bullet points should use + instead of - (e.g., + 6.7-inch screen)
+
+Focus on key specifications like:
++ Display (size, resolution, technology)
++ Processor (chipset, CPU, GPU)
++ Camera (main camera, selfie camera, video capabilities)
++ Battery (capacity, charging speed)
++ Storage and RAM options
++ Connectivity (5G, WiFi, Bluetooth)
++ Operating System
++ Special features
++ Release date and price (if available)
+
+Present the information in a clear, organized manner with sections for each category.
+
+Context information: {context}
+
+Question: {question}
+
+Detailed phone specifications:
+"""
+
 
 def initialize_llm():
     """Initialize the model through Ollama."""
@@ -74,6 +102,15 @@ def process_documents(documents):
     return chunks
 
 
+@lru_cache(maxsize=1)
+def get_embeddings():
+    """Get cached embeddings model."""
+    return HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={'device': 'cpu'}
+    )
+
+
 def create_vector_store(chunks):
     """Create vector store from document chunks."""
     if not chunks:
@@ -81,10 +118,7 @@ def create_vector_store(chunks):
 
     print("🧠 Creating vector embeddings with Chroma...")
     try:
-        embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            model_kwargs={'device': 'cpu'}
-        )
+        embeddings = get_embeddings()
         persist_directory = "chroma_db"
         vector_store = Chroma.from_documents(
             documents=chunks,
@@ -102,33 +136,7 @@ def setup_rag_pipeline(llm, vector_store):
     if not vector_store:
         return None
 
-    template = """
-        You are an AI assistant specialized in extracting and summarizing phone specifications.
-        Use the following information to provide a detailed summary of the phone specifications.
-
-        Format your response following these rules:
-        - Main headings should be between ** (e.g., **Display**)
-        - Bullet points should use + instead of - (e.g., + 6.7-inch screen)
-
-        Focus on key specifications like:
-        + Display (size, resolution, technology)
-        + Processor (chipset, CPU, GPU)
-        + Camera (main camera, selfie camera, video capabilities)
-        + Battery (capacity, charging speed)
-        + Storage and RAM options
-        + Connectivity (5G, WiFi, Bluetooth)
-        + Operating System
-        + Special features
-        + Release date and price (if available)
-
-        Present the information in a clear, organized manner with sections for each category.
-
-        Context information: {context}
-
-        Question: {question}
-
-        Detailed phone specifications:
-        """
+    template = SPECS_TEMPLATE
 
     QA_CHAIN_PROMPT = PromptTemplate(
         input_variables=["context", "question"],
@@ -158,6 +166,7 @@ def search_phone_specs(query: str, tavily_search):
     except Exception as e:
         print(f"❌ Error during search: {e}")
         return []
+
 
 def get_phone_specs(query: str, llm, tavily_search, return_sources=False):
     """Main function to process user query."""
@@ -221,6 +230,7 @@ def get_phone_specs(query: str, llm, tavily_search, return_sources=False):
     error_msg = "Could not generate a summary of the phone specifications."
     return (error_msg, sources) if return_sources else error_msg
 
+
 async def stream_specs_generator(query: str, llm, tavily_search) -> AsyncGenerator[str, None]:
     """Generator function for streaming phone specifications with real-time LLM output."""
     try:
@@ -232,12 +242,17 @@ async def stream_specs_generator(query: str, llm, tavily_search) -> AsyncGenerat
 
         all_documents = []
         sources = []
-        # total_results = len(search_results)
+        total_results = len(search_results)
 
-        for i, result in enumerate(search_results):
-            if 'url' in result:
-                sources.append(result['url'])
-                documents = scrape_website(result['url'])
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_url = {}
+            for i, result in enumerate(search_results):
+                if 'url' in result:
+                    sources.append(result['url'])
+                    future_to_url[executor.submit(scrape_website, result['url'])] = result['url']
+
+            for future in concurrent.futures.as_completed(future_to_url):
+                documents = future.result()
                 if documents:
                     all_documents.extend(documents)
 
@@ -274,33 +289,7 @@ async def stream_specs_generator(query: str, llm, tavily_search) -> AsyncGenerat
             retriever = vector_store.as_retriever(search_kwargs={'k': 5})
             docs = retriever.get_relevant_documents(query_text)
 
-            template = """
-            You are an AI assistant specialized in extracting and summarizing phone specifications.
-            Use the following information to provide a detailed summary of the phone specifications.
-
-            Format your response following these rules:
-            - Main headings should be between ** (e.g., **Display**)
-            - Bullet points should use + instead of - (e.g., + 6.7-inch screen)
-
-            Focus on key specifications like:
-            + Display (size, resolution, technology)
-            + Processor (chipset, CPU, GPU)
-            + Camera (main camera, selfie camera, video capabilities)
-            + Battery (capacity, charging speed)
-            + Storage and RAM options
-            + Connectivity (5G, WiFi, Bluetooth)
-            + Operating System
-            + Special features
-            + Release date and price (if available)
-
-            Present the information in a clear, organized manner with sections for each category.
-
-            Context information: {context}
-
-            Question: {question}
-
-            Detailed phone specifications:
-            """
+            template = SPECS_TEMPLATE
 
             prompt = PromptTemplate(
                 input_variables=["context", "question"],
