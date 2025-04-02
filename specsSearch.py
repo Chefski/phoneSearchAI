@@ -6,11 +6,12 @@ from functools import lru_cache
 from typing import AsyncGenerator
 
 import requests
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import WebBaseLoader
+from langchain_core.documents import Document
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -73,9 +74,22 @@ def scrape_website(url: str):
     print(f"🕸️ Scraping {url}...")
     for _ in range(3):
         try:
-            loader = WebBaseLoader(url)
-            documents = loader.load()
-            return documents
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+
+            soup = BeautifulSoup(response.content, 'html.parser')
+
+            for script_or_style in soup(['script', 'style']):
+                script_or_style.extract()
+
+            text = soup.get_text(separator=' ', strip=True)
+
+            document = Document(
+                page_content=text,
+                metadata={"source": url}
+            )
+
+            return [document]
         except requests.exceptions.RequestException as e:
             print(f"⚠️ Network error while scraping {url}: {e}")
             print("Retrying in 2 seconds...")
